@@ -31,6 +31,9 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
             <span className="title-welcome">WELCOME TO</span>
             <span className="title-brand">WAVE FORGE</span>
           </h1>
+          <p className="landing-hero-desc">
+            A next-generation software-defined adaptive sonar transmitter engineering high-precision acoustic waveforms with real-time in-situ environmental telemetry.
+          </p>
           <div className="landing-hero-actions">
             <button
               type="button"
