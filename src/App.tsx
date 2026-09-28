@@ -57,10 +57,12 @@ export const App: React.FC = () => {
     }
   });
 
+  const [isManualEnvActive, setIsManualEnvActive] = useState(false);
+
   // Live Micro-fluctuations Loop (Fallback dummy drift when live stream is offline or in SIMULATION mode)
   useEffect(() => {
     // Only run simulated drift if live stream is not active or explicitly forced to SIMULATION
-    if (liveStream.isConnected && streamSource === 'AUTO') {
+    if ((liveStream.isConnected && streamSource === 'AUTO') || isManualEnvActive) {
       return;
     }
 
@@ -127,6 +129,17 @@ export const App: React.FC = () => {
     setActivePage(page);
   };
 
+  const handleParamChange = (params: Partial<TelemetryData>) => {
+    if (params.temperature !== undefined || params.turbidity !== undefined || params.sound_velocity !== undefined) {
+      setIsManualEnvActive(true);
+    }
+    setTelemetry((prev) => ({
+      ...prev,
+      ...params,
+    }));
+    liveStream.sendParams(params);
+  };
+
   return (
     <>
       {/* 1. Login View */}
@@ -159,16 +172,22 @@ export const App: React.FC = () => {
             <DashboardView
               telemetry={telemetry}
               isLavenderTheme={true}
-              onParamChange={liveStream.sendParams}
+              onParamChange={handleParamChange}
             />
           )}
 
           {activePage === 'environment' && (
-            <EnvironmentView telemetry={telemetry} />
+            <EnvironmentView
+              telemetry={telemetry}
+              onParamChange={handleParamChange}
+            />
           )}
 
           {activePage === 'waveforms' && (
-            <WaveformsView telemetry={telemetry} />
+            <WaveformsView
+              telemetry={telemetry}
+              onParamChange={handleParamChange}
+            />
           )}
 
           {activePage === 'analytics' && (

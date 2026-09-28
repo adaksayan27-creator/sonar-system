@@ -4,13 +4,22 @@ import type { TelemetryData } from '../../types/sonar';
 interface DashboardViewProps {
   telemetry: TelemetryData;
   isLavenderTheme?: boolean;
-  onParamChange?: (params: {
-    center_frequency?: number;
-    bandwidth?: number;
-    pulse_duration?: number;
-    amplitude?: number;
-  }) => void;
+  onParamChange?: (params: Partial<TelemetryData>) => void;
 }
+
+// Medwin Sound Speed Equation: c = 1449.2 + 4.6*T - 0.055*T^2 + 0.00029*T^3 + (1.34 - 0.010*T)*(S - 35) + 0.016*D
+const computeMedwinSoundSpeed = (tempC: number) => {
+  const S = 33.3; // Salinity proxy baseline
+  const D = 30.0; // Depth baseline
+  const c =
+    1449.2 +
+    4.6 * tempC -
+    0.055 * Math.pow(tempC, 2) +
+    0.00029 * Math.pow(tempC, 3) +
+    (1.34 - 0.01 * tempC) * (S - 35) +
+    0.016 * D;
+  return Math.round(c);
+};
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   telemetry,
@@ -23,6 +32,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [pulseDur, setPulseDur] = useState(telemetry.pulse_duration || 20);
   const [amplitude, setAmplitude] = useState(telemetry.amplitude || 80);
   const [pri, setPri] = useState(300);
+  const [waveformType, setWaveformType] = useState(telemetry.waveform_type || 'LFM Linear Chirp');
+
+  // Environmental state for in-situ medium interconnection
+  const [temperature, setTemperature] = useState(Number((telemetry.temperature || 26.7).toFixed(1)));
+  const [turbidity, setTurbidity] = useState(Number((telemetry.turbidity || 12.4).toFixed(1)));
+  const [soundSpeed, setSoundSpeed] = useState(Math.round(telemetry.sound_velocity || 1570));
+
+  // Sync state with incoming telemetry so all pages remain interconnected
+  useEffect(() => {
+    if (telemetry.center_frequency !== undefined) setCenterFreq(telemetry.center_frequency);
+    if (telemetry.bandwidth !== undefined) setBandwidth(telemetry.bandwidth);
+    if (telemetry.pulse_duration !== undefined) setPulseDur(telemetry.pulse_duration);
+    if (telemetry.amplitude !== undefined) setAmplitude(telemetry.amplitude);
+    if (telemetry.waveform_type !== undefined) setWaveformType(telemetry.waveform_type);
+    if (telemetry.temperature !== undefined) setTemperature(Number(telemetry.temperature.toFixed(1)));
+    if (telemetry.turbidity !== undefined) setTurbidity(Number(telemetry.turbidity.toFixed(1)));
+    if (telemetry.sound_velocity !== undefined) setSoundSpeed(Math.round(telemetry.sound_velocity));
+  }, [
+    telemetry.center_frequency,
+    telemetry.bandwidth,
+    telemetry.pulse_duration,
+    telemetry.amplitude,
+    telemetry.waveform_type,
+    telemetry.temperature,
+    telemetry.turbidity,
+    telemetry.sound_velocity,
+  ]);
 
   // Checkbox legend
   const [showChirp, setShowChirp] = useState(true);
@@ -33,6 +69,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   const oscCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const specCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Derived acoustic calculations directly interconnected with medium sound velocity
+  const sweepStartNum = Math.max(10, centerFreq - bandwidth / 2);
+  const sweepEndNum = centerFreq + bandwidth / 2;
+  const sweepStart = sweepStartNum.toFixed(1);
+  const sweepEnd = sweepEndNum.toFixed(1);
+  const wavelengthMm = ((soundSpeed / (centerFreq * 1000)) * 1000).toFixed(2);
+  const rangeResCm = ((soundSpeed / (2 * bandwidth * 1000)) * 100).toFixed(1);
+  const compressionGain = (10 * Math.log10(Math.max(1, bandwidth * pulseDur))).toFixed(1);
 
   // Uptime counter
   useEffect(() => {
@@ -49,7 +94,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return `${hrs}:${mins}:${secs}`;
   };
 
-  // Oscilloscope Animation (LFM Chirp)
+  // Oscilloscope Animation (interconnected with waveformType, centerFreq, bandwidth, pulseDur, amplitude)
   useEffect(() => {
     const canvas = oscCanvasRef.current;
     if (!canvas) return;
@@ -128,7 +173,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         ctx.setLineDash([]);
       }
 
-      // Draw LFM Chirp Waveform (sweep 75 kHz -> 125 kHz visual representation in original vibrant cyan)
+      // Draw Active Waveform
       if (showChirp) {
         ctx.strokeStyle = '#0284c7';
         ctx.shadowColor = '#38bdf8';
@@ -148,10 +193,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             }
           }
 
-          // LFM chirp frequency sweep: start low, ramp to high
+          let y = centerY;
           const progress = Math.max(0, Math.min(1, (x - pulseStartX) / pulseWidth));
-          const instantaneousFreq = 0.09 + progress * (bandwidth / 200);
-          const y = centerY + Math.sin(x * instantaneousFreq + oscPhase) * maxAmplitude * env;
+
+          if (waveformType.includes('CW') || waveformType.includes('Continuous')) {
+            const cwFreq = 0.08 + (centerFreq / 100) * 0.07;
+            y = centerY + Math.sin(x * cwFreq + oscPhase) * maxAmplitude * env;
+          } else if (waveformType.includes('HFM') || waveformType.includes('Hyperbolic')) {
+            const hfmStart = 0.04;
+            const hfmEnd = 0.22;
+            const tNorm = Math.max(0.01, progress);
+            const instFreq = (hfmStart * hfmEnd) / (hfmEnd - (hfmEnd - hfmStart) * tNorm);
+            y = centerY + Math.sin(x * instFreq + oscPhase) * maxAmplitude * env;
+          } else if (waveformType.includes('Costas')) {
+            const hops = [2, 6, 3, 5, 1, 4];
+            const hopIndex = Math.min(hops.length - 1, Math.floor(progress * hops.length));
+            const hopFreq = 0.05 + hops[hopIndex] * 0.028;
+            y = centerY + Math.sin(x * hopFreq + oscPhase) * maxAmplitude * env;
+          } else {
+            // Default LFM Chirp frequency ramp
+            const startRamp = 0.05 + (sweepStartNum / 130) * 0.04;
+            const endRamp = 0.12 + (sweepEndNum / 170) * 0.16;
+            const instFreq = startRamp + progress * (endRamp - startRamp);
+            y = centerY + Math.sin(x * instFreq + oscPhase) * maxAmplitude * env;
+          }
 
           if (x === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
@@ -166,9 +231,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
     render();
     return () => cancelAnimationFrame(animId);
-  }, [pulseDur, amplitude, bandwidth, showChirp, showEnvelope]);
+  }, [pulseDur, amplitude, bandwidth, centerFreq, waveformType, showChirp, showEnvelope, isLavenderTheme, sweepStartNum, sweepEndNum]);
 
-  // Spectrum Drawing (Carrier 100 kHz with 50 kHz Bandwidth in original vibrant cyan)
+  // Spectrum Drawing (interconnected with waveformType, centerFreq, bandwidth, amplitude)
   useEffect(() => {
     const canvas = specCanvasRef.current;
     if (!canvas) return;
@@ -198,8 +263,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     ctx.moveTo(0, height - 8);
 
     for (let x = 0; x <= width; x += 3) {
-      const dist = (x - peakX) / (peakWidth * 0.55);
-      const amp = Math.exp(-0.5 * dist * dist);
+      let amp = 0;
+      if (waveformType.includes('CW') || waveformType.includes('Continuous')) {
+        const dist = (x - peakX) / (peakWidth * 0.15);
+        amp = Math.exp(-0.5 * dist * dist);
+      } else if (waveformType.includes('Costas')) {
+        const hops = [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5];
+        hops.forEach((h) => {
+          const hopX = peakX + h * (peakWidth / 3.5);
+          const dist = (x - hopX) / (peakWidth * 0.12);
+          amp += 0.3 * Math.exp(-0.5 * dist * dist);
+        });
+      } else {
+        const dist = (x - peakX) / (peakWidth * 0.55);
+        amp = Math.exp(-0.5 * dist * dist);
+      }
       const noise = (Math.sin(x * 0.25) + Math.cos(x * 0.6)) * 1.5;
       const y = height - 8 - amp * (height * 0.78) * (amplitude / 100) + noise;
       ctx.lineTo(x, Math.max(10, y));
@@ -210,10 +288,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     ctx.fill();
     ctx.stroke();
     ctx.shadowBlur = 0;
-  }, [centerFreq, bandwidth, amplitude, isLavenderTheme]);
-
-  const sweepStart = (centerFreq - bandwidth / 2).toFixed(1);
-  const sweepEnd = (centerFreq + bandwidth / 2).toFixed(1);
+  }, [centerFreq, bandwidth, amplitude, waveformType, isLavenderTheme]);
 
   return (
     <main className="dash-grid-layout" id="viewDashboard">
@@ -246,13 +321,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </section>
 
-        {/* Card 2: Waveform Parameters */}
+        {/* Card 2: Interconnected Waveform & Medium Acoustics */}
         <section className="dash-card">
-          <h2 className="dash-card-title">LFM Waveform Engine</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <h2 className="dash-card-title" style={{ margin: 0 }}>Acoustic Waveform Engine</h2>
+            <span style={{ fontSize: '10px', color: '#0284c7', background: 'rgba(2, 132, 199, 0.08)', padding: '2px 6px', borderRadius: '4px', fontWeight: 600 }}>SYNCED</span>
+          </div>
           <div className="dash-kv-list">
             <div className="dash-kv-row">
               <span className="kv-label">Waveform Type</span>
-              <span className="kv-val val-cyan" id="valWaveformType">LFM Linear Chirp</span>
+              <span className="kv-val val-cyan" id="valWaveformType">{waveformType}</span>
             </div>
             <div className="dash-kv-row">
               <span className="kv-label">Sweep Frequency</span>
@@ -271,6 +349,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span className="kv-val">{pulseDur} ms</span>
             </div>
             <div className="dash-kv-row">
+              <span className="kv-label">Acoustic Wavelength (λ)</span>
+              <span className="kv-val" style={{ color: '#0284c7', fontWeight: 700 }}>{wavelengthMm} mm</span>
+            </div>
+            <div className="dash-kv-row">
+              <span className="kv-label">Range Resolution (ΔR)</span>
+              <span className="kv-val" style={{ color: '#7c3aed', fontWeight: 700 }}>{rangeResCm} cm</span>
+            </div>
+            <div className="dash-kv-row">
+              <span className="kv-label">Compression Gain</span>
+              <span className="kv-val val-green">+{compressionGain} dB</span>
+            </div>
+            <div className="dash-kv-row">
               <span className="kv-label">DAC Sample Rate</span>
               <span className="kv-val val-green">1.0 MSPS (Target)</span>
             </div>
@@ -285,10 +375,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <div>
               <h2 className="dash-card-title">Real-Time Waveform Monitor</h2>
               <p className="dash-card-subtitle">
-                STM32 DAC Waveform Engine (LFM Chirp {sweepStart}–{sweepEnd} kHz / 20ms)
+                Software-defined acoustic waveform generation with live synchronized telemetry
               </p>
             </div>
-            <div className="waveform-legend">
+            <div className="dash-legend">
               <label className="legend-item">
                 <input
                   type="checkbox"
@@ -297,7 +387,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   onChange={(e) => setShowChirp(e.target.checked)}
                 />
                 <span className="legend-color-box box-cyan"></span>
-                <span>LFM Chirp</span>
+                <span>{waveformType}</span>
               </label>
               <label className="legend-item">
                 <input
@@ -314,9 +404,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           {/* Upper Oscilloscope Screen */}
           <div className="oscilloscope-wrapper">
-            <div className="pulse-dur-label pulse-dur-top">Pulse: {pulseDur} ms</div>
+            <div className="pulse-dur-label pulse-dur-top">Pulse: {pulseDur} ms | λ: {wavelengthMm} mm</div>
             <canvas ref={oscCanvasRef} id="oscilloscopeCanvas" width={760} height={240}></canvas>
-            <div className="pulse-dur-label pulse-dur-bottom">Pulse Duration ({pulseDur} ms)</div>
+            <div className="pulse-dur-label pulse-dur-bottom">Pulse Duration ({pulseDur} ms) — Resolution: {rangeResCm} cm</div>
           </div>
 
           {/* Lower Frequency Spectrum Screen */}
@@ -330,53 +420,76 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span>150 kHz</span>
               <span>200 kHz</span>
             </div>
-            <div className="spectrum-x-axis-title">Frequency (kHz) — 100 kHz Center Target</div>
+            <div className="spectrum-x-axis-title">Frequency (kHz) — {centerFreq.toFixed(1)} kHz Center (Δf = {bandwidth.toFixed(1)} kHz)</div>
           </div>
         </section>
       </div>
 
       {/* RIGHT COLUMN: Environmental Inputs & Operational Controls */}
       <div className="dash-col dash-col-right">
-        {/* Card 1: Environmental Inputs (Strictly labeled per hardware reality) */}
+        {/* Card 1: Environmental Inputs (Interconnected with Sound Velocity & Acoustic Resolution) */}
         <section className="dash-card">
-          <h2 className="dash-card-title">Environmental Inputs</h2>
-          <div className="dash-kv-list">
-            <div className="dash-kv-row">
-              <span className="kv-label">
-                Temperature <span style={{ fontSize: '10px', color: '#34d399' }}>[REAL]</span>
-              </span>
-              <span className="kv-val" id="valWaterTemp">
-                {telemetry.temperature.toFixed(1)} °C
-              </span>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <h2 className="dash-card-title" style={{ margin: 0 }}>Environmental Inputs</h2>
+            <span style={{ fontSize: '10px', color: '#7c3aed', background: 'rgba(124, 58, 237, 0.08)', padding: '2px 6px', borderRadius: '4px', fontWeight: 600 }}>LIVE IN-SITU</span>
+          </div>
+
+          <div className="dash-controls-list">
+            {/* Water Temperature */}
+            <div className="dash-control-row">
+              <div className="control-header">
+                <span className="control-name">
+                  Water Temperature <span style={{ fontSize: '10px', color: '#10b981', fontWeight: 600 }}>[REAL]</span>
+                </span>
+                <span className="control-val" id="valWaterTemp">{temperature.toFixed(1)} °C</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="50"
+                step="0.1"
+                value={temperature}
+                className="cyber-slider"
+                id="sliderWaterTemp"
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setTemperature(val);
+                  const computedSpeed = computeMedwinSoundSpeed(val);
+                  setSoundSpeed(computedSpeed);
+                  onParamChange?.({ temperature: val, sound_velocity: computedSpeed });
+                }}
+              />
             </div>
-            <div className="dash-kv-row">
-              <span className="kv-label">
-                Turbidity <span style={{ fontSize: '10px', color: '#34d399' }}>[REAL]</span>
-              </span>
-              <span className="kv-val val-green" id="valTurbidity">
-                {telemetry.turbidity.toFixed(1)} NTU
-              </span>
+
+            {/* Turbidity */}
+            <div className="dash-control-row">
+              <div className="control-header">
+                <span className="control-name">
+                  Turbidity <span style={{ fontSize: '10px', color: '#10b981', fontWeight: 600 }}>[REAL]</span>
+                </span>
+                <span className="control-val val-green" id="valTurbidity">{turbidity.toFixed(1)} NTU</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="0.5"
+                value={turbidity}
+                className="cyber-slider"
+                id="sliderTurbidity"
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  setTurbidity(val);
+                  onParamChange?.({ turbidity: val });
+                }}
+              />
             </div>
-            <div className="dash-kv-row">
-              <span className="kv-label">
-                Depth Proxy <span style={{ fontSize: '10px', color: '#f59e0b' }}>[POT PROXY]</span>
-              </span>
-              <span className="kv-val" id="valOceanDepth">
-                {telemetry.depth_proxy.toFixed(2)} m
-              </span>
-            </div>
-            <div className="dash-kv-row">
-              <span className="kv-label">
-                Salinity Proxy <span style={{ fontSize: '10px', color: '#f59e0b' }}>[POT PROXY]</span>
-              </span>
-              <span className="kv-val" id="valSalinity">
-                {telemetry.salinity_proxy.toFixed(1)} PSU
-              </span>
-            </div>
-            <div className="dash-kv-row">
-              <span className="kv-label">Computed Sound Vel.</span>
+
+            {/* Computed Sound Velocity */}
+            <div className="dash-kv-row" style={{ marginTop: '4px', paddingTop: '6px', borderTop: '1px solid rgba(226, 232, 240, 0.8)' }}>
+              <span className="kv-label">Computed Sound Vel. (c)</span>
               <span className="kv-val val-cyan" id="valSoundVel">
-                {Math.round(telemetry.sound_velocity)} m/s
+                {Math.round(soundSpeed)} m/s
               </span>
             </div>
           </div>
@@ -497,3 +610,5 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     </main>
   );
 };
+
+export default DashboardView;
